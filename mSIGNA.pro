@@ -174,13 +174,19 @@ RESOURCES = \
 unix {
 	target.path = $$PREFIX/bin
 	
-	desktop.path = $$PREFIX/share/applications/$${TARGET}
+	desktop.path = $$PREFIX/share/applications
 	desktop.files += $${TARGET}.desktop
 
 	icon.path = $$PREFIX/share/$${TARGET}
 	icon.files = $${TARGET}.png
 
-	INSTALLS += target desktop icon
+	license.path = $$PREFIX/share/licenses/$${lower($$TARGET)}
+	license.files = LICENSE
+
+	menu.path = $$PREFIX/share/menu
+	menu.files = $${TARGET}.menu
+
+	INSTALLS += target desktop icon license menu
 }
 
 win32 {

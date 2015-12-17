@@ -1,0 +1,6 @@
+?package(msigna):needs="x11" \
+  section="Applications/Internet" \
+  hints="Bitcoin Client" \
+  title="mSIGNA" \
+  icon="/usr/share/mSIGNA/mSIGNA.png" \
+  command="/usr/bin/mSIGNA"
