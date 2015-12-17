@@ -159,7 +159,7 @@ then
     fi
 fi
 
-${QMAKE_PATH}qmake $SPEC CONFIG+=$BUILD_TYPE && make $OPTIONS
+${QMAKE_PATH}qmake $SPEC CONFIG+=$BUILD_TYPE PREFIX= && make $OPTIONS
 
 if [[ "$OS" == "osx" ]]
 then

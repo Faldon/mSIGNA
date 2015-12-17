@@ -8,6 +8,14 @@ ifndef DB
         DB = mysql
     else ifneq ($(wildcard $(GLOBAL_SYSROOT)/lib/libodb-mysql.*),)
         DB = mysql
+	else ifneq ($(wildcard $(LOCAL_SYSROOT)/lib/odb/libodb-sqlite.*),)
+        DB = sqlite
+    else ifneq ($(wildcard $(GLOBAL_SYSROOT)/lib/odb/libodb-sqlite.*),)
+        DB = sqlite
+    else ifneq ($(wildcard $(LOCAL_SYSROOT)/lib/odb/libodb-mysql.*),)
+        DB = mysql
+    else ifneq ($(wildcard $(GLOBAL_SYSROOT)/lib/odb/libodb-mysql.*),)
+        DB = mysql
     endif
 endif
 

@@ -5,6 +5,11 @@
 #
 # All Rights Reserved.
 
+isEmpty(PREFIX) {
+    PREFIX = /usr/local
+}
+PREFIX = $$clean_path($$PREFIX)
+
 # Application icons for windows
 RC_FILE = res/coinvault.rc
 
@@ -25,6 +30,7 @@ INCLUDEPATH += \
 
 LIBS += \
     -Lsysroot/lib \
+    -L/usr/lib/odb \
     -lCoinDB \
     -lCoinQ \
     -lCoinCore \
@@ -32,9 +38,9 @@ LIBS += \
     -lqrencode
 
 CONFIG(debug, debug|release) {
-    DESTDIR = build/debug
+    DESTDIR = $$OUT_PWD/build/debug
 } else {
-    DESTDIR = build/release
+    DESTDIR = $$OUT_PWD/build/release
 }
 
 OBJECTS_DIR = $$DESTDIR/obj
@@ -165,8 +171,17 @@ RESOURCES = \
     docs/docs.qrc
 
 # install
-target.path = build 
-INSTALLS += target
+unix {
+	target.path = $$PREFIX/bin
+	
+	desktop.path = $$PREFIX/share/applications/$${TARGET}
+	desktop.files += $${TARGET}.desktop
+
+	icon.path = $$PREFIX/share/$${TARGET}
+	icon.files = $${TARGET}.png
+
+	INSTALLS += target desktop icon
+}
 
 win32 {
     BOOST_LIB_SUFFIX = -mt-s
