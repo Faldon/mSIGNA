@@ -3,8 +3,11 @@
 // CoinQ_peer_io.cpp
 //
 // Copyright (c) 2012-2013 Eric Lombrozo
+// Copyright (c) 2011-2016 Ciphrex Corp.
 //
-// All Rights Reserved.
+// Distributed under the MIT software license, see the accompanying
+// file LICENSE or http://www.opensource.org/licenses/mit-license.php.
+//
 
 #include "CoinQ_peer_io.h"
 
@@ -103,7 +106,7 @@ void Peer::do_read()
             LOGGER(debug) << "Peer read handler - command: " << command << endl;
 
             // Get payload size
-            unsigned int payloadSize = vch_to_uint<uint32_t>(uchar_vector(read_message.begin() + 16, read_message.begin() + 20), _BIG_ENDIAN);
+            unsigned int payloadSize = vch_to_uint<uint32_t>(uchar_vector(read_message.begin() + 16, read_message.begin() + 20), LITTLE_ENDIAN_);
             LOGGER(debug) << "Peer read handler - payload size: " << payloadSize << endl;
             LOGGER(debug) << "Peer read handler - read_message size: " << read_message.size() << endl;
 
@@ -249,6 +252,7 @@ void Peer::do_write(boost::shared_ptr<uchar_vector> data)
 void Peer::do_send(const Coin::CoinNodeMessage& message)
 {
     boost::shared_ptr<uchar_vector> data(new uchar_vector(message.getSerialized()));
+    // LOGGER(trace) << "do_send() - data: " << data->getHex() << std::endl;
     boost::lock_guard<boost::mutex> sendLock(sendMutex);
     sendQueue.push(data);
     if (sendQueue.size() == 1) { strand_.post(boost::bind(&Peer::do_write, this, data)); }
@@ -371,6 +375,7 @@ bool Peer::send(Coin::CoinNodeStructure& message)
     if (!bRunning || !bWriteReady) return false;
 
     Coin::CoinNodeMessage wrappedMessage(magic_bytes_, &message);
+    // LOGGER(trace) << "message: " << message.getSerialized().getHex() << std::endl;
     do_send(wrappedMessage);
     return true;
 }

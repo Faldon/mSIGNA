@@ -3,8 +3,10 @@
 // Vault.cpp
 //
 // Copyright (c) 2013-2014 Eric Lombrozo
+// Copyright (c) 2011-2016 Ciphrex Corp.
 //
-// All Rights Reserved.
+// Distributed under the MIT software license, see the accompanying
+// file LICENSE or http://www.opensource.org/licenses/mit-license.php.
 //
 
 #define LOCK_ALL_CALLS
@@ -498,6 +500,7 @@ Coin::BloomFilter Vault::getBloomFilter(double falsePositiveRate, uint32_t nTwea
 #if defined(LOCK_ALL_CALLS)
     boost::lock_guard<boost::mutex> lock(mutex);
 #endif
+    odb::core::session s;
     odb::core::transaction t(db_->begin());
     return getBloomFilter_unwrapped(falsePositiveRate, nTweak, nFlags);
 }
@@ -507,13 +510,57 @@ Coin::BloomFilter Vault::getBloomFilter_unwrapped(double falsePositiveRate, uint
     using namespace CoinQ::Script;
 
     std::vector<bytes_t> elements;
-    odb::result<SigningScriptView> r(db_->query<SigningScriptView>());
-    for (auto& view: r)
+
+    // Add scripts
     {
-        Script script(view.txinscript);
-        elements.push_back(script.txinscript(Script::SIGN));                // Add input script element
-        elements.push_back(getScriptPubKeyPayee(view.txoutscript).second);  // Add output script element
+        odb::result<SigningScript> r(db_->query<SigningScript>());
+        for (auto& script: r)
+        {
+/*
+            // Add input script element
+            if (r.account()->use_witness())
+            {
+                WitnessProgram_P2WSH wp(view.redeemscript);
+                elements.push_back(wp.script());
+            }
+            else
+            {
+                elements.push_back(view.redeemscript);
+            }
+*/
+
+            // Add script elements
+            if (script.account()->use_witness())
+            {
+                WitnessProgram_P2WSH wp(script.redeemscript());
+                elements.push_back(wp.script());
+                if (script.account()->use_witness_p2sh())
+                {
+                    elements.push_back(getScriptPubKeyPayee(script.txoutscript()).second);
+                }
+            }
+            else
+            {
+                elements.push_back(getScriptPubKeyPayee(script.txoutscript()).second);
+            }
+        }
     }
+
+    {
+        // Add outpoints
+        typedef odb::query<TxOut> query_t;
+        odb::result<TxOut> r(db_->query<TxOut>(query_t::sending_account != 0 && query_t::status == TxOut::UNSPENT));
+        for (auto& txout: r)
+        {
+            std::shared_ptr<Tx> tx = txout.tx();
+            if (tx)
+            {
+                Coin::OutPoint outpoint(tx->hash(), txout.txindex());
+                elements.push_back(outpoint.getSerialized());
+            }
+        }
+    }
+
     if (elements.empty()) return Coin::BloomFilter();
 
     Coin::BloomFilter filter(elements.size(), falsePositiveRate, nTweak, nFlags);
@@ -1437,9 +1484,9 @@ std::string Vault::getNextAvailableAccountName_unwrapped(const std::string& desi
     return ss.str();
 }
 
-void Vault::newAccount(const std::string& account_name, unsigned int minsigs, const std::vector<std::string>& keychain_names, uint32_t unused_pool_size, uint32_t time_created, bool compressed_keys)
+void Vault::newAccount(const std::string& account_name, unsigned int minsigs, const std::vector<std::string>& keychain_names, uint32_t unused_pool_size, uint32_t time_created, bool compressed_keys, bool use_witness, bool use_witness_p2sh)
 {
-    LOGGER(trace) << "Vault::newAccount(" << account_name << ", " << minsigs << " of [" << stdutils::delimited_list(keychain_names, ", ") << "], " << unused_pool_size << ", " << time_created << ")" << std::endl;
+    LOGGER(trace) << "Vault::newAccount(" << account_name << ", " << minsigs << " of [" << stdutils::delimited_list(keychain_names, ", ") << "], " << unused_pool_size << ", " << time_created << (use_witness ? "true" : "false") << ", " << (use_witness_p2sh ? "true" : "false") << ")" << std::endl;
 
     boost::lock_guard<boost::mutex> lock(mutex);
     odb::core::session s;
@@ -1455,7 +1502,7 @@ void Vault::newAccount(const std::string& account_name, unsigned int minsigs, co
         keychains.insert(r.begin().load());
     }
 
-    std::shared_ptr<Account> account(new Account(account_name, minsigs, keychains, unused_pool_size, time_created, compressed_keys));
+    std::shared_ptr<Account> account(new Account(account_name, minsigs, keychains, unused_pool_size, time_created, compressed_keys, use_witness, use_witness_p2sh));
     r = db_->query<Account>(odb::query<Account>::hash == account->hash());
     if (!r.empty()) throw AccountAlreadyExistsException(account->name());
     db_->persist(account);
@@ -1482,6 +1529,11 @@ void Vault::newAccount(const std::string& account_name, unsigned int minsigs, co
     db_->update(defaultAccountBin);
     db_->update(account);
     t.commit();
+}
+
+void Vault::newAccount(bool use_witness, bool use_witness_p2sh, const std::string& account_name, unsigned int minsigs, const std::vector<std::string>& keychain_names, uint32_t unused_pool_size, uint32_t time_created, bool compressed_keys)
+{
+    newAccount(account_name, minsigs, keychain_names, unused_pool_size, time_created, compressed_keys, use_witness, use_witness_p2sh);
 }
 
 void Vault::renameAccount(const std::string& old_name, const std::string& new_name)
@@ -2209,8 +2261,8 @@ std::shared_ptr<Tx> Vault::insertTx_unwrapped(std::shared_ptr<Tx> tx, bool repla
 {
     try
     {
-        // TODO: Validate signatures
         tx->updateStatus();
+        Coin::Transaction cointx(tx->toCoinCore());
         std::string hashstr = uchar_vector(tx->hash()).getHex();
         std::string unsignedhashstr = uchar_vector(tx->unsigned_hash()).getHex();
         LOGGER(trace) << "Vault::insertTx_unwrapped(...) - hash: " << hashstr << ", unsigned hash: " << unsignedhashstr << std::endl;
@@ -2224,12 +2276,25 @@ std::shared_ptr<Tx> Vault::insertTx_unwrapped(std::shared_ptr<Tx> tx, bool repla
             LOGGER(debug) << "Vault::insertTx_unwrapped - We have a transaction with the same unsigned hash: " << unsignedhashstr << std::endl;
             std::shared_ptr<Tx> stored_tx(tx_r.begin().load());
 
+            Coin::Transaction stored_cointx(stored_tx->toCoinCore());
+
             // Sanity check: TxIn and TxOut counts should match
             if (tx->txins().size() != stored_tx->txins().size() ||
                 tx->txouts().size() != stored_tx->txouts().size())
             {
                 throw TxMismatchException(stored_tx->hash());
             }
+
+            // We need to set the outpoints for sighash operations in updateStatus.
+            bool checksigs = true;
+            for (auto& txin: tx->txins())
+            {
+                txin->outpoint(stored_tx->txins()[txin->txindex()]->outpoint());
+                if (!txin->outpoint()) { checksigs = false; }
+            }
+
+            tx->updateStatus(Tx::NO_STATUS, checksigs);
+            LOGGER(trace) << "tx status: " << tx->getStatusString() << std::endl;
 
             bool updated = false;
 
@@ -2277,10 +2342,12 @@ std::shared_ptr<Tx> Vault::insertTx_unwrapped(std::shared_ptr<Tx> tx, bool repla
                     txins_t txins = tx->txins();
                     for (auto& txin: stored_tx->txins())
                     {
-                        txin->script(txins[i++]->script());
+                        txin->script(txins[i]->script());
+                        txin->scriptwitnessstack(txins[i]->scriptwitnessstack());
                         db_->update(txin);
+                        i++;
                     }
-                    stored_tx->updateStatus(tx->status());
+                    stored_tx->updateStatus(tx->status(), true);
                     db_->update(stored_tx);
                     updated = true;
                 }
@@ -2293,14 +2360,18 @@ std::shared_ptr<Tx> Vault::insertTx_unwrapped(std::shared_ptr<Tx> tx, bool repla
                     for (auto& txin: stored_tx->txins())
                     {
                         using namespace CoinQ::Script;
-                        Script stored_script(txin->script());
-                        Script new_script(txins[i]->script());
-                        unsigned int sigsadded = stored_script.mergesigs(new_script);
+                        uint64_t outpointvalue = txin->outpoint() ? txin->outpoint()->value() : 0;
+                        SignableTxIn stored_stxin(stored_cointx, i, outpointvalue);
+                        SignableTxIn new_stxin(cointx, i, outpointvalue); 
+                        unsigned int sigsadded = stored_stxin.mergesigs(new_stxin);
                         if (sigsadded > 0)
                         {
-                            int sigsneeded = stored_script.sigsneeded();
+                            int sigsneeded = stored_stxin.sigsneeded();
                             LOGGER(debug) << "Vault::insertTx_unwrapped - ADDED " << sigsadded << " NEW SIGNATURE(S) TO INPUT " << i << ", " << sigsneeded << " STILL NEEDED." << std::endl;
-                            txin->script(stored_script.txinscript(sigsneeded ? Script::EDIT : Script::BROADCAST));
+                            txin->script(stored_stxin.txinscript());
+                            std::vector<bytes_t> stack;
+                            for (auto& item: stored_stxin.scriptwitness().stack) { stack.push_back(item); }
+                            txin->scriptwitnessstack(stack);
                             db_->update(txin);
                             sigs_updated = true;
                         }
@@ -2309,7 +2380,7 @@ std::shared_ptr<Tx> Vault::insertTx_unwrapped(std::shared_ptr<Tx> tx, bool repla
 
                     if (sigs_updated)
                     {
-                        stored_tx->updateStatus();
+                        stored_tx->updateStatus(Tx::NO_STATUS, true);
                         db_->update(stored_tx);
                         updated = true;
                     }
@@ -2367,8 +2438,9 @@ std::shared_ptr<Tx> Vault::insertTx_unwrapped(std::shared_ptr<Tx> tx, bool repla
                 bytes_t txoutscript;
                 try
                 {
-                    CoinQ::Script::Script script(txin->script());
-                    if (script.type() == CoinQ::Script::Script::PAY_TO_MULTISIG_SCRIPT_HASH) { txoutscript = script.txoutscript(); }
+                    CoinQ::Script::SignableTxIn signabletxin(cointx, txin->txindex(), 0);
+                    txoutscript = signabletxin.txoutscript();
+LOGGER(trace) << "txoutscript!!! " << uchar_vector(txoutscript).getHex() << std::endl;
                 }
                 catch (const std::exception& e)
                 {
@@ -2422,6 +2494,11 @@ std::shared_ptr<Tx> Vault::insertTx_unwrapped(std::shared_ptr<Tx> tx, bool repla
                         sending_account = script->account();
                     }
                 }
+            }
+            if (sent_from_vault)
+            {
+                tx->updateStatus(Tx::NO_STATUS, true);
+                LOGGER(trace) << "sent from vault tx status: " << tx->getStatusString() << std::endl;
             }
         }
 
@@ -2504,6 +2581,8 @@ std::shared_ptr<Tx> Vault::insertTx_unwrapped(std::shared_ptr<Tx> tx, bool repla
 
         if (sent_from_vault || sent_to_vault)
         {
+            // TODO: better tx status update method
+            if (!sent_from_vault) { tx->status(Tx::PROPAGATED); tx->hash(tx->toCoinCore().hash()); }
             LOGGER(debug) << "Vault::insertTx_unwrapped - INSERTING NEW TRANSACTION. hash: " << uchar_vector(tx->hash()).getHex() << ", unsigned hash: " << uchar_vector(tx->unsigned_hash()).getHex() << std::endl;
             tx->updateTotals();
 
@@ -2561,12 +2640,6 @@ std::shared_ptr<Tx> Vault::insertNewTx_unwrapped(const Coin::Transaction& cointx
     {
         using namespace CoinQ::Script;
 
-        if (verifysigs)
-        {
-            Signer signer(cointx);
-            if (!signer.isSigned()) throw TxNotSignedException(cointx.hash());
-        }
-
         std::shared_ptr<Tx> tx(new Tx());
         tx->set(cointx, blockheader ? blockheader->timestamp() : time(NULL), Tx::PROPAGATED);
 
@@ -2575,6 +2648,17 @@ std::shared_ptr<Tx> Vault::insertNewTx_unwrapped(const Coin::Transaction& cointx
         if (!r.empty())
         {
             std::shared_ptr<Tx> stored_tx(r.begin().load());
+            if (verifysigs)
+            {
+                std::vector<uint64_t> outpointvalues;
+                for (auto& txin: stored_tx->txins())
+                {
+                    outpointvalues.push_back(txin->outpoint() ? txin->outpoint()->value() : 0);
+                    Signer signer(cointx, outpointvalues);
+                    if (signer.sigsneeded()) throw TxNotSignedException(cointx.hash());
+                }
+            }
+
             if (stored_tx->status() < Tx::CONFIRMED)
             {
                 LOGGER(debug) << "Vault::insertNewTx_unwrapped - ADDING/REPLACING SIGNATURES, UPDATING CONFIRMATIONS AND STATUS. hash: " << uchar_vector(tx->hash()).getHex() << std::endl;
@@ -2683,6 +2767,8 @@ std::shared_ptr<Tx> Vault::insertNewTx_unwrapped(const Coin::Transaction& cointx
 
         if (sending_account || receive)
         {
+            // TODO: better tx status update method
+            if (!sending_account) { tx->status(Tx::PROPAGATED); tx->hash(tx->toCoinCore().hash()); }
             for (auto& script:  updated_scripts)
             {
                 db_->update(script);
@@ -3038,6 +3124,14 @@ std::shared_ptr<Tx> Vault::createTx_unwrapped(const std::string& account_name, u
     {
         total += utxoview.value;
         std::shared_ptr<TxIn> txin(new TxIn(utxoview.tx_hash, utxoview.tx_index, utxoview.signingscript_txinscript, 0xffffffff));
+        if (account->use_witness())
+        {
+            using namespace CoinQ::Script;
+            scriptstack_t stack;
+            for (std::size_t k = 0; k <= account->keychains().size(); k++) { stack.push_back(bytes_t()); }
+            stack.push_back(utxoview.signingscript_redeemscript); 
+            txin->scriptwitnessstack(stack);
+        }
         txins.push_back(txin);
         i++;
         if (total >= desired_total) break;
@@ -3162,6 +3256,14 @@ std::shared_ptr<Tx> Vault::createTx_unwrapped(const std::string& account_name, u
         for (auto& utxoview: utxoview_r)
         {
             std::shared_ptr<TxIn> txin(new TxIn(utxoview.tx_hash, utxoview.tx_index, utxoview.signingscript_txinscript, 0xffffffff));
+            if (account->use_witness())
+            {
+                using namespace CoinQ::Script;
+                scriptstack_t stack;
+                for (std::size_t k = 0; k <= account->keychains().size(); k++) { stack.push_back(bytes_t()); }
+                stack.push_back(utxoview.signingscript_redeemscript); 
+                txin->scriptwitnessstack(stack);
+            }
             txins.push_back(txin);
             input_total += utxoview.value;
         }
@@ -3182,6 +3284,14 @@ std::shared_ptr<Tx> Vault::createTx_unwrapped(const std::string& account_name, u
         for (auto& utxoview: utxoviews)
         {
             std::shared_ptr<TxIn> txin(new TxIn(utxoview.tx_hash, utxoview.tx_index, utxoview.signingscript_txinscript, 0xffffffff));
+            if (account->use_witness())
+            {
+                using namespace CoinQ::Script;
+                scriptstack_t stack;
+                for (std::size_t k = 0; k <= account->keychains().size(); k++) { stack.push_back(bytes_t()); }
+                stack.push_back(utxoview.signingscript_redeemscript); 
+                txin->scriptwitnessstack(stack);
+            }
             txins.push_back(txin);
             input_total += utxoview.value;
             if (input_total >= desired_total) break;
@@ -3357,6 +3467,14 @@ txs_t Vault::consolidateTxOuts_unwrapped(const std::string& account_name, uint32
     for (auto& utxoview: utxoviews)
     {
         std::shared_ptr<TxIn> txin(new TxIn(utxoview.tx_hash, utxoview.tx_index, utxoview.signingscript_txinscript, 0xffffffff));
+        if (account->use_witness())
+        {
+            using namespace CoinQ::Script;
+            scriptstack_t stack;
+            for (std::size_t k = 0; k <= account->keychains().size(); k++) { stack.push_back(bytes_t()); }
+            stack.push_back(utxoview.signingscript_redeemscript); 
+            txin->scriptwitnessstack(stack);
+        }
         txins.push_back(txin);
         test_tx->set(tx_version, txins, txouts, tx_locktime, time(NULL), Tx::UNSIGNED);
         if (test_tx->raw().size() > max_tx_size)
@@ -3562,19 +3680,19 @@ SignatureInfo Vault::getSignatureInfo_unwrapped(std::shared_ptr<Tx> tx) const
     unsigned int sigsNeeded = 0;
     std::set<bytes_t> missingpubkeys;
     std::set<bytes_t> presentpubkeys;
-
-    for (auto& script: signer.getScripts())
+ 
+    for (auto& signabletxin: signer.getSignableTxIns())
     {
-        unsigned int n = script.sigsneeded();
+        unsigned int n = signabletxin.sigsneeded();
         if (n > sigsNeeded) sigsNeeded = n;
 
         {
-            std::vector<bytes_t> pubkeys = script.missingsigs();
+            std::vector<bytes_t> pubkeys = signabletxin.missingsigs();
             for (auto& pubkey: pubkeys) { missingpubkeys.insert(pubkey); }
         }
 
         {
-            std::vector<bytes_t> pubkeys = script.presentsigs();
+            std::vector<bytes_t> pubkeys = signabletxin.presentsigs();
             for (auto& pubkey: pubkeys) { presentpubkeys.insert(pubkey); }
         }
     }
@@ -3657,6 +3775,8 @@ unsigned int Vault::signTx_unwrapped(std::shared_ptr<Tx> tx, std::vector<std::st
     using namespace CoinQ::Script;
     using namespace CoinCrypto;
 
+    Coin::Transaction coin_tx = tx->toCoinCore();
+
     // No point in trying nonprivate keys
     odb::query<Key> privkey_query(odb::query<Key>::is_private != 0);
 
@@ -3669,27 +3789,20 @@ unsigned int Vault::signTx_unwrapped(std::shared_ptr<Tx> tx, std::vector<std::st
     unsigned int sigsadded = 0;
     for (auto& txin: tx->txins())
     {
-        Script script(txin->script());
-        unsigned int sigsneeded = script.sigsneeded();
+        uint64_t outpointvalue = txin->outpoint() ? txin->outpoint()->value() : 0;
+        SignableTxIn signableTxIn(coin_tx, txin->txindex(), outpointvalue);
+
+        unsigned int sigsneeded = signableTxIn.sigsneeded();
         if (sigsneeded == 0) continue;
 
-        std::vector<bytes_t> pubkeys = script.missingsigs();
+        std::vector<bytes_t> pubkeys = signableTxIn.missingsigs();
         if (pubkeys.empty()) continue;
 
         odb::result<Key> key_r(db_->query<Key>(privkey_query && odb::query<Key>::pubkey.in_range(pubkeys.begin(), pubkeys.end())));
         if (key_r.empty()) continue;
 
-        // Prepare the inputs for hashing
-        Coin::Transaction coin_tx = tx->toCoinCore();
-        unsigned int i = 0;
-        for (auto& coin_input: coin_tx.inputs)
-        {
-            if (i++ == txin->txindex()) { coin_input.scriptSig = script.txinscript(Script::SIGN); }
-            else                        { coin_input.scriptSig.clear(); }
-        }
-
         // Compute hash to sign
-        bytes_t signingHash = coin_tx.getHashWithAppendedCode(SIGHASH_ALL);
+        bytes_t signingHash = coin_tx.getSigHash(SIGHASH_ALL, txin->txindex(), signableTxIn.redeemscript(), outpointvalue);
         LOGGER(debug) << "Vault::signTx_unwrapped - computed signing hash " << uchar_vector(signingHash).getHex() << " for input " << txin->txindex() << std::endl;
 
         for (auto& key: key_r)
@@ -3712,7 +3825,7 @@ unsigned int Vault::signTx_unwrapped(std::shared_ptr<Tx> tx, std::vector<std::st
 
             bytes_t signature = secp256k1_sign(signingKey, signingHash);
             signature.push_back(SIGHASH_ALL);
-            script.addSig(key.pubkey(), signature);
+            signableTxIn.addsig(key.pubkey(), signature);
             LOGGER(debug) << "Vault::signTx_unwrapped - PUBLIC KEY: " << uchar_vector(key.pubkey()).getHex() << " SIGNATURE: " << uchar_vector(signature).getHex() << std::endl;
             keychains_signed.insert(key.root_keychain());
             sigsadded++;
@@ -3720,14 +3833,17 @@ unsigned int Vault::signTx_unwrapped(std::shared_ptr<Tx> tx, std::vector<std::st
             if (sigsneeded == 0) break;
         }
 
-        txin->script(script.txinscript(sigsneeded ? Script::EDIT : Script::BROADCAST));
+        txin->script(signableTxIn.txinscript());
+        std::vector<bytes_t> stack;
+        for (auto& item: signableTxIn.scriptwitness().stack) { stack.push_back(item); }
+        txin->scriptwitnessstack(stack);
     }
 
     keychain_names.clear();
     if (!sigsadded) return 0;
 
     for (auto& keychain: keychains_signed) { keychain_names.push_back(keychain->name()); }
-    tx->updateStatus();
+    tx->updateStatus(Tx::NO_STATUS, true);
     return sigsadded;
 }
 

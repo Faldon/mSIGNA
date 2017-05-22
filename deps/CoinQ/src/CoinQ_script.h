@@ -2,9 +2,12 @@
 //
 // CoinQ_script.h 
 //
-// Copyright (c) 2013 Eric Lombrozo
+// Copyright (c) 2013-2016 Eric Lombrozo
+// Copyright (c) 2011-2016 Ciphrex Corp.
 //
-// All Rights Reserved.
+// Distributed under the MIT software license, see the accompanying
+// file LICENSE or http://www.opensource.org/licenses/mit-license.php.
+//
 
 #ifndef _COINQ_SCRIPT_H_
 #define _COINQ_SCRIPT_H_
@@ -12,8 +15,11 @@
 #include "CoinQ_txs.h"
 
 #include <CoinCore/CoinNodeData.h>
+#include <CoinCore/hdkeys.h>
 #include <CoinCore/typedefs.h>
 
+#include <algorithm>
+#include <deque>
 #include <utility>
 
 namespace CoinQ {
@@ -129,13 +135,42 @@ enum
     OP_CHECKSIG,
     OP_CHECKSIGVERIFY,
     OP_CHECKMULTISIG,
-    OP_CHECKMULTISIGVERIFY
+    OP_CHECKMULTISIGVERIFY,
+
+    // Expansion
+    OP_NOP1,
+    OP_CHECKLOCKTIMEVERIFY,
+    OP_NOP3,
+    OP_NOP4,
+    OP_NOP5,
+    OP_NOP6,
+    OP_NOP7,
+    OP_NOP8,
+    OP_NOP9,
+    OP_NOP10,
+
+    // Pseudo
+    OP_PUBKEYHASH = 0xfd,
+    OP_PUBKEY,
+    OP_INVALIDOPCODE,
+};
+
+enum
+{
+    OP_TOKENHASH = OP_PUBKEYHASH,
+    OP_TOKEN,
+    OP_SIG,
 };
 
 /*
  * opPushData - constructs an operator (of variable length) indicating nBytes of data follow.
 */
 uchar_vector opPushData(uint32_t nBytes);
+
+/*
+ * pushStackItem - constructs a stack push for an object of arbitrary length.
+*/
+uchar_vector pushStackItem(const uchar_vector& data);
 
 /*
  * getDataLength
@@ -145,13 +180,24 @@ uchar_vector opPushData(uint32_t nBytes);
 */
 uint32_t getDataLength(const uchar_vector& script, uint& pos);
 
+/*
+ * getNextOp
+ *      precondition: pos indicates the position in script
+ *      postcondition: pos is advanced to the start of the next operation or end of script
+ *      returns: the complete op starting at pos including any data if pushed - if pushdataonly is true,
+ *               only the data pushed to the stack is returned
+*/
+uchar_vector getNextOp(const bytes_t& script, uint& pos, bool pushdataonly = false);
+
 // TODO: Get rid of PUBKEY in names below
 enum ScriptType {
     SCRIPT_PUBKEY_UNKNOWN_TYPE,
     SCRIPT_PUBKEY_EMPTY_SCRIPT,
     SCRIPT_PUBKEY_PAY_TO_PUBKEY,
     SCRIPT_PUBKEY_PAY_TO_PUBKEY_HASH,
-    SCRIPT_PUBKEY_PAY_TO_SCRIPT_HASH
+    SCRIPT_PUBKEY_PAY_TO_SCRIPT_HASH,
+    SCRIPT_PUBKEY_PAY_TO_WITNESS_PUBKEY_HASH,
+    SCRIPT_PUBKEY_PAY_TO_WITNESS_SCRIPT_HASH,
 };
 
 enum SigHashType {
@@ -184,6 +230,158 @@ uchar_vector getTxOutScriptForAddress(const std::string& address, const unsigned
  * getAddressForTxOutScript - create a base58check address from a txoutscript
 */
 std::string getAddressForTxOutScript(const bytes_t& txoutscript, const unsigned char addressVersions[]);
+
+
+class SymmetricKeyGroup
+{
+public:
+    SymmetricKeyGroup(const std::vector<uchar_vector>& pubkeys) : pubkeys_(pubkeys)
+    {
+        sort();
+    }
+
+    std::size_t count() const { return pubkeys_.size(); }
+
+    const uchar_vector& operator[](std::size_t i) const { return pubkeys_[i]; }
+    const std::vector<uchar_vector>& pubkeys() const { return pubkeys_; }
+
+protected:
+    std::vector<uchar_vector> pubkeys_;
+
+    SymmetricKeyGroup() { }
+    void sort() { std::sort(pubkeys_.begin(), pubkeys_.end()); }
+};
+
+class SymmetricHDKeyGroup : public SymmetricKeyGroup
+{
+public:
+    SymmetricHDKeyGroup(const std::vector<uchar_vector>& extkeys);
+
+    uint32_t index() const { return index_; }
+
+    SymmetricHDKeyGroup& next()
+    {
+        index_++;
+        update();
+        return *this;
+    }
+
+    SymmetricHDKeyGroup& next(uint32_t index)
+    {
+        index_ = index;
+        update();
+        return *this;
+    }
+    
+protected:
+    std::vector<Coin::HDKeychain> keychains_;
+    uint32_t index_;
+
+    void update();
+};
+
+
+typedef std::vector<bytes_t> scriptstack_t;
+
+scriptstack_t scriptToStack(const uchar_vector& script);
+
+class ScriptTemplate
+{
+public:
+    ScriptTemplate() { }
+    ScriptTemplate(const uchar_vector& pattern) : pattern_(pattern) { }
+
+    const uchar_vector& pattern() const { return pattern_; }
+    void pattern(const uchar_vector& pattern) { pattern_ = pattern; reduced_.clear(); }
+
+    const uchar_vector& script() const;
+    uchar_vector script(const uchar_vector& token) const; // use index 0 only
+    uchar_vector script(const std::vector<uchar_vector>& tokens) const;
+
+    scriptstack_t stack() const { return scriptToStack(script()); }
+    scriptstack_t stack(const uchar_vector& token) const { return scriptToStack(script(token)); }
+    scriptstack_t stack(const std::vector<uchar_vector>& tokens) const { return scriptToStack(script(tokens)); }
+
+    ScriptTemplate& apply(const uchar_vector& token);
+    ScriptTemplate& apply(const std::vector<uchar_vector>& tokens);
+    ScriptTemplate& reset();
+    
+
+private:
+    uchar_vector pattern_;
+    uchar_vector reduced_;
+};
+
+// Witness program types
+enum WitnessProgramType
+{
+    WITNESS_UNDEFINED,
+    WITNESS_NONE,
+    WITNESS_P2WPKH,
+    WITNESS_P2WSH,
+};
+
+WitnessProgramType getWitnessProgramType(const uchar_vector& wp); 
+
+// Abstract base class for witness programs
+class WitnessProgram
+{
+public:
+    const uchar_vector&                 script() const { return script_; }
+    uchar_vector                        p2shscript() const;
+    std::string                         p2shaddress(const unsigned char addressVersions[]) const;
+    const std::deque<uchar_vector>&     stack() const { return stack_; }
+
+    // Subclasses must implement address()
+    virtual std::string                 address(const unsigned char addressVersions[]) const = 0;
+    virtual WitnessProgramType          type() const { return WITNESS_UNDEFINED; }
+    virtual std::string                 typestring() const { return "WITNESS_UNDEFINED"; }
+
+protected:
+    uchar_vector script_;
+    std::deque<uchar_vector> stack_;
+
+    // Subclasses must implement update() and call it from the constructor
+    virtual void update() = 0;
+};
+
+// Version 0: Pay to witness pubkey hash
+class WitnessProgram_P2WPKH : public WitnessProgram
+{
+public:
+    WitnessProgram_P2WPKH(const uchar_vector& pubkey) : pubkey_(pubkey) { update(); }
+
+    const uchar_vector& pubkey() const { return pubkey_; }
+    const uchar_vector& pubkeyhash() const { return pubkeyhash_; }
+    std::string         address(const unsigned char addressVersions[]) const;
+    WitnessProgramType  type() const { return WITNESS_P2WPKH; }
+    std::string         typestring() const { return "WITNESS_P2WPKH"; }
+
+protected:
+    uchar_vector pubkey_;
+    uchar_vector pubkeyhash_;
+
+    void update(); 
+};
+
+// Version 0: Pay to witness script hash
+class WitnessProgram_P2WSH : public WitnessProgram
+{
+public:
+    WitnessProgram_P2WSH(const uchar_vector& redeemscript) : redeemscript_(redeemscript) { update(); }
+
+    const uchar_vector& redeemscript() const { return redeemscript_; }
+    const uchar_vector& redeemscripthash() const { return redeemscripthash_; }
+    std::string         address(const unsigned char addressVersions[]) const;
+    WitnessProgramType  type() const { return WITNESS_P2WSH; }
+    std::string         typestring() const { return "WITNESS_P2WSH"; }
+
+protected:
+    uchar_vector redeemscript_;
+    uchar_vector redeemscripthash_;
+
+    void update();
+};
 
 
 class Script
@@ -234,31 +432,118 @@ private:
     bytes_t hash_;
 };
 
-
 typedef std::vector<Script> scripts_t;
+
+
+class SignableTxIn
+{
+public:
+    enum type_t
+    {
+        UNKNOWN,
+        MISSING_WITNESS,
+        PAY_TO_PUBKEY,
+        PAY_TO_PUBKEY_HASH,
+        PAY_TO_M_OF_N_SCRIPT_HASH,
+        PAY_TO_PUBKEY_HASH_WITNESS_V0,
+        PAY_TO_M_OF_N_WITNESS_V0,
+    };
+
+    type_t type() const { return type_; }
+
+    const char* typestring() const
+    {
+        switch (type_)
+        {
+        case UNKNOWN:                       return "UNKNOWN";
+        case MISSING_WITNESS:               return "MISSING_WITNESS";
+        case PAY_TO_PUBKEY:                 return "PAY_TO_PUBKEY";
+        case PAY_TO_PUBKEY_HASH:            return "PAY_TO_PUBKEY_HASH";
+        case PAY_TO_M_OF_N_SCRIPT_HASH:     return "PAY_TO_M_OF_N_SCRIPT_HASH";
+        case PAY_TO_PUBKEY_HASH_WITNESS_V0: return "PAY_TO_PUBKEY_HASH_WITNESS_V0";
+        case PAY_TO_M_OF_N_WITNESS_V0:      return "PAY_TO_M_OF_N_WITNESS_V0";
+        default:                            return "UNDEFINED";
+        }
+    }
+
+    explicit SignableTxIn(const SignableTxIn& other) :
+        type_(other.type_),
+        minsigs_(other.minsigs_),
+        pubkeys_(other.pubkeys_),
+        sigs_(other.sigs_),
+        redeemscript_(other.redeemscript_) { }
+
+    SignableTxIn(const Coin::Transaction& tx, std::size_t nIn, uint64_t outpointamount = 0, const bytes_t& txoutscript = bytes_t()) { setTxIn(tx, nIn, outpointamount); }
+
+    void setTxIn(const Coin::Transaction& tx, std::size_t nIn, uint64_t outpointamount = 0, const bytes_t& txoutscript = bytes_t());
+
+    unsigned int minsigs() const { return minsigs_; }
+    const std::vector<bytes_t>& pubkeys() const { return pubkeys_; }
+    const std::vector<bytes_t>& sigs() const { return sigs_; }
+
+    bytes_t txinscript() const;
+    bytes_t txoutscript() const;
+    Coin::ScriptWitness scriptwitness() const;
+
+    const bytes_t& redeemscript() const { return redeemscript_; }
+
+    unsigned int sigsneeded() const; // returns how many signatures are still needed
+    std::vector<bytes_t> missingsigs() const; // returns pubkeys for which we are still missing signatures
+    std::vector<bytes_t> presentsigs() const; // returns pubkeys for which we have signatures
+    bool addsig(const bytes_t& pubkey, const bytes_t& sig); // returns true iff signature was absent and has been added
+    void clearsigs(); // resets all signatures to 0-length placeholders
+    unsigned int mergesigs(const SignableTxIn& other); // merges the signatures from another input that is otherwise identical. returns number of signatures added.
+
+private:
+    type_t type_;
+    unsigned int minsigs_;
+    std::vector<bytes_t> pubkeys_;
+    std::vector<bytes_t> sigs_; // empty vectors for missing signatures
+    bytes_t redeemscript_; // empty if type is not script hash
+};
+
+typedef std::vector<SignableTxIn> signabletxins_t;
+
 
 class Signer
 {
 public:
-    Signer() : isSigned_(false) { }
-    explicit Signer(const Coin::Transaction& tx, bool clearinvalidsigs = false) { setTx(tx, clearinvalidsigs); }
+    Signer() { }
+    explicit Signer(const Coin::Transaction& tx, const std::vector<uint64_t>& outpointvalues = std::vector<uint64_t>()) { setTx(tx, outpointvalues); }
 
-    void setTx(const Coin::Transaction& tx, bool clearinvalidsigs = false);
+    void setTx(const Coin::Transaction& tx, const std::vector<uint64_t>& outpointvalues = std::vector<uint64_t>());
+
     const Coin::Transaction& getTx() const { return tx_; }
 
-    // sign returns a vector of the pubkeys for which signatures were added.
-    std::vector<bytes_t> sign(const std::vector<secure_bytes_t>& privkeys);
+    // returns how many signatures are still needed
+    unsigned int sigsneeded(std::size_t nIn) const;
+    unsigned int sigsneeded() const;
 
-    bool isSigned() const { return isSigned_; }
+    // returns pubkeys for which we are still missing signatures
+    std::vector<bytes_t> missingsigs(std::size_t nIn) const;
+    std::vector<bytes_t> missingsigs() const;
 
-    const scripts_t& getScripts() const { return scripts_; }
+    // returns pubkeys for which we have signatures
+    std::vector<bytes_t> presentsigs(std::size_t nIn) const;
+    std::vector<bytes_t> presentsigs() const;
 
-    void clearSigs() { for (auto& script: scripts_) script.clearSigs(); }
+    // returns true iff signature was absent and has been added
+    bool addsig(std::size_t nIn, const bytes_t& pubkey, const bytes_t& sig);
+    bool addsig(const bytes_t& pubkey, const bytes_t& sig);
+
+    void clearsigs(std::size_t nIn); // resets all signatures
+    void clearsigs();
+
+    // merges the signatures from another input that is otherwise identical.
+    // returns number of signatures added.
+    unsigned int mergesigs(std::size_t nIn, const Signer& other);
+    unsigned int mergesigs(const Signer& other);
+
+    const signabletxins_t& getSignableTxIns() const { return signabletxins_; }
 
 private:
     Coin::Transaction tx_;
-    bool isSigned_;
-    scripts_t scripts_;
+    signabletxins_t signabletxins_;
 };
 
 }

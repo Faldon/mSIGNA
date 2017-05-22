@@ -3,8 +3,10 @@
 // Schema.cpp
 //
 // Copyright (c) 2013-2014 Eric Lombrozo
+// Copyright (c) 2011-2016 Ciphrex Corp.
 //
-// All Rights Reserved.
+// Distributed under the MIT software license, see the accompanying
+// file LICENSE or http://www.opensource.org/licenses/mit-license.php.
 //
 
 #include "Schema.h"
@@ -371,15 +373,25 @@ secure_bytes_t Key::try_privkey() const
  * class Account
  */
 
-Account::Account(const std::string& name, unsigned int minsigs, const KeychainSet& keychains, uint32_t unused_pool_size, uint32_t time_created, bool compressed_keys)
-    : name_(name), minsigs_(minsigs), keychains_(keychains), unused_pool_size_(unused_pool_size), time_created_(time_created), compressed_keys_(compressed_keys)
+Account::Account()
 {
+    scripttemplatesloaded_ = false;
+}
+
+Account::Account(const std::string& name, unsigned int minsigs, const KeychainSet& keychains, uint32_t unused_pool_size, uint32_t time_created, bool compressed_keys, bool use_witness, bool use_witness_p2sh)
+    : name_(name), minsigs_(minsigs), keychains_(keychains), unused_pool_size_(unused_pool_size), time_created_(time_created), compressed_keys_(compressed_keys), use_witness_(use_witness), use_witness_p2sh_(use_witness_p2sh)
+{
+    if (!use_witness_) { use_witness_p2sh_ = false; }
+
+    scripttemplatesloaded_ = false;
+
     // TODO: Use exception classes
     if (name_.empty() || name[0] == '@') throw std::runtime_error("Invalid account name.");
     if (keychains_.size() > 15) throw std::runtime_error("Account can use at most 15 keychains.");
     if (minsigs > keychains_.size()) throw std::runtime_error("Account minimum signatures cannot exceed number of keychains.");
     if (minsigs < 1) throw std::runtime_error("Account must require at least one signature.");
 
+    initScriptPatterns();
     updateHash();
 }
 
@@ -394,9 +406,36 @@ void Account::updateHash()
     for (auto& keychain_hash: keychain_hashes) { data += keychain_hash; }
 
     if (!compressed_keys_) { data.push_back(0x00); }
+    if (use_witness_)
+    {
+        if (use_witness_p2sh_)  { data.push_back(0x03); }
+        else                    { data.push_back(0x01); }
+    }
 
     hash_ = ripemd160(sha256(data));
 }
+
+void Account::initScriptPatterns()
+{
+    using namespace CoinQ::Script;
+
+    uchar_vector redeempattern;
+    redeempattern << (OP_1_OFFSET + minsigs_);
+    for (unsigned int k = 0; k < keychains_.size(); k++)
+    {
+        redeempattern << OP_PUBKEY << k;
+    }
+    redeempattern << (OP_1_OFFSET + keychains_.size()) << OP_CHECKMULTISIG;
+    redeempattern_ = redeempattern;
+}
+
+void Account::loadScriptTemplates()
+{
+    if (scripttemplatesloaded_) return;
+    redeemtemplate_.pattern(redeempattern_);
+    scripttemplatesloaded_ = true;
+}
+
 
 AccountInfo Account::accountInfo() const
 {
@@ -414,7 +453,7 @@ AccountInfo Account::accountInfo() const
         }
     }
 
-    return AccountInfo(id_, name_, minsigs_, keychain_names, issued_script_count, unused_pool_size_, time_created_, bin_names, compressed_keys_);
+    return AccountInfo(id_, name_, minsigs_, keychain_names, issued_script_count, unused_pool_size_, time_created_, bin_names, compressed_keys_, use_witness_, use_witness_p2sh_);
 }
 
 std::shared_ptr<AccountBin> Account::addBin(const std::string& name)
@@ -584,11 +623,39 @@ SigningScript::SigningScript(std::shared_ptr<AccountBin> account_bin, uint32_t i
     // sort keys into canonical order
     std::sort(keys_.begin(), keys_.end(), [](std::shared_ptr<Key> key1, std::shared_ptr<Key> key2) { return key1->pubkey() < key2->pubkey(); });
 
-    std::vector<bytes_t> pubkeys;
+    std::vector<uchar_vector> pubkeys;
     for (auto& key: keys_) { pubkeys.push_back(key->pubkey()); }
-    CoinQ::Script::Script script(CoinQ::Script::Script::PAY_TO_MULTISIG_SCRIPT_HASH, account_bin->minsigs(), pubkeys);
-    txinscript_ = script.txinscript(CoinQ::Script::Script::EDIT);
-    txoutscript_ = script.txoutscript();
+
+    account_->loadScriptTemplates();
+    redeemscript_ = account_->redeemtemplate().script(pubkeys);
+
+    using namespace CoinQ::Script;
+
+    if (account_->use_witness())
+    {
+        WitnessProgram_P2WSH wp(redeemscript_);
+        if (account_->use_witness_p2sh())
+        {
+            txinscript_ = pushStackItem(wp.script());
+            txoutscript_ = wp.p2shscript();
+        }
+        else
+        {
+            txoutscript_ = wp.script();
+        }
+    }
+    else
+    {
+        uchar_vector txinscript, txoutscript;
+
+        txinscript << OP_0;
+        for (std::size_t k = 0; k < pubkeys.size(); k++) { txinscript << OP_0; }
+        txinscript << pushStackItem(redeemscript_);
+        txinscript_ = txinscript;
+
+        txoutscript << OP_HASH160 << pushStackItem(hash160(redeemscript_)) << OP_EQUAL;
+        txoutscript_ = txoutscript;
+    }
 
     account_bin_->setScriptLabel(index, label);
 }
@@ -714,13 +781,13 @@ std::string MerkleBlock::toJson() const
 
 TxIn::TxIn(const Coin::TxIn& coin_txin)
 {
-	fromCoinCore(coin_txin);
+    fromCoinCore(coin_txin);
 }
 
 TxIn::TxIn(const bytes_t& raw)
 {
     Coin::TxIn coin_txin(raw);
-	fromCoinCore(coin_txin);
+    fromCoinCore(coin_txin);
 }
 
 void TxIn::fromCoinCore(const Coin::TxIn& coin_txin)
@@ -744,9 +811,9 @@ bytes_t TxIn::unsigned_script() const
 {
     using namespace CoinQ::Script;
 
-    Script script(script_);
-    script.clearSigs();
-    return script.txinscript(Script::EDIT);
+    SignableTxIn signabletxin(tx()->toCoinCore(), txindex_, outpoint() ? outpoint()->value() : 0);
+    signabletxin.clearsigs();
+    return signabletxin.txinscript();
 }
 
 bytes_t TxIn::raw() const
@@ -781,6 +848,13 @@ std::string TxIn::toJson() const
        << "\"sequence\":" << sequence_
        << "}";
     return ss.str();
+}
+
+static std::vector<bytes_t> emptyScriptInputs(std::size_t n)
+{
+    std::vector<bytes_t> scriptinputs;
+    for (std::size_t k = 0; k < n; k++) { scriptinputs.push_back(bytes_t()); }
+    return scriptinputs;
 }
 
 
@@ -925,7 +999,7 @@ std::vector<Tx::status_t> Tx::getStatusFlags(int status)
     return flags;
 }
 
-void Tx::set(uint32_t version, const txins_t& txins, const txouts_t& txouts, uint32_t locktime, uint32_t timestamp, status_t status, bool conflicting)
+void Tx::set(uint32_t version, const txins_t& txins, const txouts_t& txouts, uint32_t locktime, uint32_t timestamp, status_t status, bool conflicting, bool checksigs)
 {
     version_ = version;
 
@@ -952,8 +1026,8 @@ void Tx::set(uint32_t version, const txins_t& txins, const txouts_t& txouts, uin
 
     Coin::Transaction coin_tx = toCoinCore();
 
-    if (missingSigCount())  { status_ = UNSIGNED; }
-    else                    { status_ = status; hash_ = coin_tx.hash(); }
+    if (checksigs && missingSigCount()) { status_ = UNSIGNED; }
+    else                                { status_ = status; hash_ = coin_tx.hash(); }
 
     conflicting_ = conflicting;
 
@@ -962,15 +1036,15 @@ void Tx::set(uint32_t version, const txins_t& txins, const txouts_t& txouts, uin
     updateTotals();
 }
 
-void Tx::set(Coin::Transaction coin_tx, uint32_t timestamp, status_t status, bool conflicting)
+void Tx::set(Coin::Transaction coin_tx, uint32_t timestamp, status_t status, bool conflicting, bool checksigs)
 {
     //LOGGER(trace) << "Tx::set - fromCoinCore(coin_tx);" << std::endl;
     fromCoinCore(coin_tx);
 
     timestamp_ = timestamp;
 
-    if (missingSigCount())  { status_ = UNSIGNED; }
-    else                    { status_ = status; hash_ = coin_tx.hash(); }
+    if (checksigs && missingSigCount()) { status_ = UNSIGNED; }
+    else                                { status_ = status; hash_ = coin_tx.hash(); }
 
     conflicting_ = conflicting;
 
@@ -979,14 +1053,14 @@ void Tx::set(Coin::Transaction coin_tx, uint32_t timestamp, status_t status, boo
     updateTotals();
 }
 
-void Tx::set(const bytes_t& raw, uint32_t timestamp, status_t status, bool conflicting)
+void Tx::set(const bytes_t& raw, uint32_t timestamp, status_t status, bool conflicting, bool checksigs)
 {
     Coin::Transaction coin_tx(raw);
     fromCoinCore(coin_tx);
     timestamp_ = timestamp;
 
-    if (missingSigCount())  { status_ = UNSIGNED; }
-    else                    { status_ = status; hash_ = coin_tx.hash(); }
+    if (checksigs && missingSigCount()) { status_ = UNSIGNED; }
+    else                                { status_ = status; hash_ = coin_tx.hash(); }
 
     conflicting_ = conflicting;
 
@@ -995,10 +1069,10 @@ void Tx::set(const bytes_t& raw, uint32_t timestamp, status_t status, bool confl
     updateTotals();
 }
 
-bool Tx::updateStatus(status_t status /* = NO_STATUS */)
+bool Tx::updateStatus(status_t status /* = NO_STATUS */, bool checksigs)
 {
     // Tx is not signed.
-    if (missingSigCount())
+    if (checksigs && missingSigCount())
     {
         status_ = UNSIGNED;
         hash_ = bytes_t();
@@ -1040,7 +1114,13 @@ Coin::Transaction Tx::toCoinCore() const
 {
     Coin::Transaction coin_tx;
     coin_tx.version = version_;
-    for (auto& txin:  txins_) { coin_tx.inputs.push_back(txin->toCoinCore()); }
+    for (auto& txin: txins_)
+    {
+        coin_tx.inputs.push_back(txin->toCoinCore());
+        Coin::TxIn& input = coin_tx.inputs.back();
+        for (auto& item: txin->scriptwitnessstack()) { input.scriptWitness.push(item); }
+    }
+
     for (auto& txout: txouts_) { coin_tx.outputs.push_back(txout->toCoinCore()); }
     coin_tx.lockTime = locktime_;
     return coin_tx;
@@ -1059,9 +1139,9 @@ void Tx::blockheader(std::shared_ptr<BlockHeader> blockheader)
     else if (status_ == CONFIRMED)  { status_ = PROPAGATED; }   
 }
 
-bytes_t Tx::raw() const
+bytes_t Tx::raw(bool withWitness) const
 {
-    return toCoinCore().getSerialized();
+    return toCoinCore().getSerialized(withWitness);
 }
 
 void Tx::updateTotals()
@@ -1112,8 +1192,14 @@ void Tx::fromCoinCore(const Coin::Transaction& coin_tx)
     {
         std::shared_ptr<TxIn> txin(new TxIn(coin_txin));
         txin->tx(shared_from_this());
-        txin->txindex(i++);
+        txin->txindex(i);
+
+        std::vector<bytes_t> stack;
+        for (auto& item: coin_txin.scriptWitness.stack) { stack.push_back(item); } 
+        txin->scriptwitnessstack(stack);
+
         txins_.push_back(txin);
+        i++;
     }
 
     i = 0;
@@ -1134,10 +1220,12 @@ unsigned int Tx::missingSigCount() const
     // Assume for now all inputs belong to the same account.
     using namespace CoinQ::Script;
     unsigned int count = 0;
+    Coin::Transaction cointx(toCoinCore());
     for (auto& txin: txins_)
     {
-        Script script(txin->script());
-        unsigned int sigsneeded = script.sigsneeded();
+        uint64_t outpointvalue = txin->outpoint() ? txin->outpoint()->value() : 0;
+        SignableTxIn signabletxin(cointx, txin->txindex(), outpointvalue);
+        unsigned int sigsneeded = signabletxin.sigsneeded();
         if (sigsneeded > count) count = sigsneeded;
     }
     return count;
@@ -1147,10 +1235,12 @@ std::set<bytes_t> Tx::missingSigPubkeys() const
 {
     using namespace CoinQ::Script;
     std::set<bytes_t> pubkeys;
+    Coin::Transaction cointx = toCoinCore();
     for (auto& txin: txins_)
     {
-        Script script(txin->script());
-        std::vector<bytes_t> txinpubkeys = script.missingsigs();
+        uint64_t outpointvalue = txin->outpoint() ? txin->outpoint()->value() : 0;
+        SignableTxIn signabletxin(cointx, txin->txindex(), outpointvalue);
+        std::vector<bytes_t> txinpubkeys = signabletxin.missingsigs();
         for (auto& txinpubkey: txinpubkeys) { pubkeys.insert(txinpubkey); }
     } 
     return pubkeys;
@@ -1161,10 +1251,10 @@ std::set<bytes_t> Tx::presentSigPubkeys() const
     std::set<bytes_t> pubkeys;
 
     using namespace CoinQ::Script;
-    Signer signer(toCoinCore(), true);
-    for (auto& script: signer.getScripts())
+    Signer signer_(signer());
+    for (auto& signabletxin: signer_.getSignableTxIns())
     {
-        std::vector<bytes_t> txinpubkeys = script.presentsigs();
+        std::vector<bytes_t> txinpubkeys = signabletxin.presentsigs();
         for (auto& txinpubkey: txinpubkeys) { pubkeys.insert(txinpubkey); }
     } 
     return pubkeys;
@@ -1172,7 +1262,14 @@ std::set<bytes_t> Tx::presentSigPubkeys() const
 
 CoinQ::Script::Signer Tx::signer() const
 {
-    return CoinQ::Script::Signer(toCoinCore(), true);
+    using namespace CoinQ::Script;
+    std::vector<uint64_t> outpointvalues;
+    for (auto& txin: txins_)
+    {
+        outpointvalues.push_back(txin->outpoint() ? txin->outpoint()->value() : 0);
+    }
+
+    return Signer(toCoinCore(), outpointvalues);
 }
 
 std::string Tx::toJson(bool includeRawHex, bool includeSerialized) const

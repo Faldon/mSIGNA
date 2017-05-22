@@ -3,8 +3,11 @@
 // CoinQ_peer_io.h 
 //
 // Copyright (c) 2012-2014 Eric Lombrozo
+// Copyright (c) 2011-2016 Ciphrex Corp.
 //
-// All Rights Reserved.
+// Distributed under the MIT software license, see the accompanying
+// file LICENSE or http://www.opensource.org/licenses/mit-license.php.
+//
 
 #pragma once
 
@@ -22,6 +25,10 @@
 #include <boost/thread.hpp>
 #include <boost/asio.hpp>
 
+#include <CoinCore/CoinNodeData.h> // TODO: Move flags into separate include file
+
+// TODO: Support flags for segregated witness
+const uint32_t DEFAULT_INV_FLAGS = 0; // MSG_WITNESS_FLAG;
 
 inline uint64_t getRandomNonce64()
 {
@@ -58,7 +65,7 @@ typedef std::function<void(Peer&, const Coin::Inventory&)>          peer_inv_slo
 class Peer
 {
 public:
-    Peer(io_service_t& io_service, const std::string& host = "", const std::string& port = "", uint32_t magic_bytes = 0, uint32_t protocol_version = 0, const std::string& user_agent = std::string(), uint32_t start_height = 0, bool relay = true) :
+    Peer(io_service_t& io_service, const std::string& host = "", const std::string& port = "", uint32_t magic_bytes = 0, uint32_t protocol_version = 0, const std::string& user_agent = std::string(), uint32_t start_height = 0, bool relay = true, uint32_t invFlags = DEFAULT_INV_FLAGS) :
         //io_service_(io_service),
         strand_(io_service),
         resolver_(io_service),
@@ -71,9 +78,10 @@ public:
         user_agent_(user_agent),
         start_height_(start_height),
         relay_(relay),
+        invFlags_(invFlags),
         bRunning(false)
     {
-        magic_bytes_vector_ = uint_to_vch(magic_bytes_, _BIG_ENDIAN);
+        magic_bytes_vector_ = uint_to_vch(magic_bytes_, LITTLE_ENDIAN_);
     }
 
     ~Peer() { stop(); }
@@ -89,8 +97,10 @@ public:
         start_height_ = start_height;
         relay_ = relay;
 
-        magic_bytes_vector_ = uint_to_vch(magic_bytes_, _BIG_ENDIAN);
+        magic_bytes_vector_ = uint_to_vch(magic_bytes_, LITTLE_ENDIAN_);
     }
+
+    void setInvFlags(uint32_t invFlags) { invFlags_ = invFlags; }
 
     void subscribeMessage(peer_message_slot_t slot) { notifyMessage.connect(slot); }
     void subscribeHeaders(peer_headers_slot_t slot) { notifyHeaders.connect(slot); }
@@ -121,6 +131,8 @@ public:
     std::string resolved_name() const { std::stringstream ss; ss << endpoint_.address().to_string() << ":" << endpoint_.port(); return ss.str(); }
     std::string name() const { std::stringstream ss; ss << host_ << ":" << port_; return ss.str(); }
 
+    uint32_t inv_flags() const { return invFlags_; }
+
     void getTx(const bytes_t& hash)
     {
         if (hash.size() != 32)
@@ -132,7 +144,7 @@ public:
             return;
         }
 
-        Coin::InventoryItem tx(MSG_TX, hash);
+        Coin::InventoryItem tx(MSG_TX | invFlags_, hash);
         Coin::Inventory inv;
         inv.addItem(tx);
         Coin::GetDataMessage getData(inv);
@@ -156,7 +168,7 @@ public:
                 return;
             }
 
-            inv.addItem(InventoryItem(MSG_TX, hash));
+            inv.addItem(InventoryItem(MSG_TX | invFlags_, hash));
         }
         GetDataMessage getData(inv);
         send(getData);
@@ -173,7 +185,7 @@ public:
             return;
         }
 
-        Coin::InventoryItem block(MSG_BLOCK, hash);
+        Coin::InventoryItem block(MSG_BLOCK | invFlags_, hash);
         Coin::Inventory inv;
         inv.addItem(block);
         Coin::GetDataMessage getData(inv);
@@ -191,7 +203,7 @@ public:
             return;
         }
 
-        Coin::InventoryItem block(MSG_FILTERED_BLOCK, hash);
+        Coin::InventoryItem block(MSG_FILTERED_BLOCK | invFlags_, hash);
         Coin::Inventory inv;
         inv.addItem(block);
         Coin::GetDataMessage getData(inv);
@@ -298,7 +310,9 @@ private:
     std::string user_agent_;
     uint32_t start_height_;
     bool relay_;
-    
+
+    // Protocol flags
+    uint32_t invFlags_;
 
     // State members
     boost::shared_mutex mutex;

@@ -3,8 +3,10 @@
 // Schema.h
 //
 // Copyright (c) 2013-2014 Eric Lombrozo
+// Copyright (c) 2011-2016 Ciphrex Corp.
 //
-// All Rights Reserved.
+// Distributed under the MIT software license, see the accompanying
+// file LICENSE or http://www.opensource.org/licenses/mit-license.php.
 //
 
 // odb compiler complains about #pragma once
@@ -55,7 +57,7 @@ typedef odb::nullable<unsigned long> null_id_t;
 ////////////////////
 
 #define SCHEMA_BASE_VERSION 12
-#define SCHEMA_VERSION      17
+#define SCHEMA_VERSION      22
 
 #ifdef ODB_COMPILER
 #pragma db model version(SCHEMA_BASE_VERSION, SCHEMA_VERSION, open)
@@ -580,7 +582,9 @@ public:
         uint32_t unused_pool_size,
         uint32_t time_created,
         const std::vector<std::string>& bin_names,
-        bool compressed_keys = true
+        bool compressed_keys = true,
+        bool use_witness = false,
+        bool use_witness_p2sh = false
     ) :
         id_(id),
         name_(name),
@@ -590,7 +594,9 @@ public:
         unused_pool_size_(unused_pool_size),
         time_created_(time_created),
         bin_names_(bin_names),
-        compressed_keys_(compressed_keys)
+        compressed_keys_(compressed_keys),
+        use_witness_(use_witness),
+        use_witness_p2sh_(use_witness_p2sh)
     {
         std::sort(keychain_names_.begin(), keychain_names_.end());
     }
@@ -604,7 +610,9 @@ public:
         unused_pool_size_(source.unused_pool_size_),
         time_created_(source.time_created_),
         bin_names_(source.bin_names_),
-        compressed_keys_(source.compressed_keys_)
+        compressed_keys_(source.compressed_keys_),
+        use_witness_(source.use_witness_),
+        use_witness_p2sh_(source.use_witness_p2sh_)
     { }
 
     AccountInfo& operator=(const AccountInfo& source)
@@ -618,6 +626,8 @@ public:
         time_created_ = source.time_created_;
         bin_names_ = source.bin_names_;
         compressed_keys_ = source.compressed_keys_;
+        use_witness_ = source.use_witness_;
+        use_witness_p2sh_ = source.use_witness_p2sh_;
         return *this;
     }
 
@@ -630,6 +640,8 @@ public:
     uint32_t                            time_created() const { return time_created_; }
     const std::vector<std::string>&     bin_names() const { return bin_names_; }
     bool                                compressed_keys() const { return compressed_keys_; }
+    bool                                use_witness() const { return use_witness_; }
+    bool                                use_witness_p2sh() const { return use_witness_p2sh_; }
 
 private:
     unsigned long               id_;
@@ -641,6 +653,8 @@ private:
     uint32_t                    time_created_;
     std::vector<std::string>    bin_names_;
     bool                        compressed_keys_;
+    bool                        use_witness_;
+    bool                        use_witness_p2sh_;
 };
 
 const uint32_t DEFAULT_UNUSED_POOL_SIZE = 25;
@@ -649,8 +663,9 @@ const uint32_t DEFAULT_UNUSED_POOL_SIZE = 25;
 class Account : public std::enable_shared_from_this<Account>
 {
 public:
-    Account() { }
-    Account(const std::string& name, unsigned int minsigs, const KeychainSet& keychains, uint32_t unused_pool_size = DEFAULT_UNUSED_POOL_SIZE, uint32_t time_created = time(NULL), bool compressed_keys = true);
+    Account();
+    Account(const std::string& name, unsigned int minsigs, const KeychainSet& keychains, uint32_t unused_pool_size = DEFAULT_UNUSED_POOL_SIZE, uint32_t time_created = time(NULL), bool compressed_keys = true, bool use_witness = false, bool use_witness_p2sh = false);
+    Account(bool use_witness, bool use_witness_p2sh, const std::string& name, unsigned int minsigs, const KeychainSet& keychains, uint32_t unused_pool_size = DEFAULT_UNUSED_POOL_SIZE, uint32_t time_created = time(NULL), bool compressed_keys = true) : Account(name, minsigs, keychains, unused_pool_size, time_created, compressed_keys, use_witness, use_witness_p2sh) { }
 
     void updateHash();
 
@@ -678,6 +693,11 @@ public:
     void compressed_keys(bool compressed_keys) { compressed_keys_ = compressed_keys; }
     bool compressed_keys() const { return compressed_keys_; }
 
+    void loadScriptTemplates();
+    bool use_witness() const { return use_witness_; }
+    bool use_witness_p2sh() const { return use_witness_p2sh_; }
+    const CoinQ::Script::ScriptTemplate& redeemtemplate() const { return redeemtemplate_; }
+
 private:
     friend class odb::access;
 
@@ -703,6 +723,18 @@ private:
 
     bool compressed_keys_;
 
+    bool use_witness_;
+    bytes_t redeempattern_;
+
+    bool use_witness_p2sh_;
+
+    void initScriptPatterns();
+
+    #pragma db transient
+    bool scripttemplatesloaded_;
+    #pragma db transient
+    CoinQ::Script::ScriptTemplate redeemtemplate_;
+
     friend class boost::serialization::access;
     template<class Archive>
     void save(Archive& ar, const unsigned int version) const
@@ -725,6 +757,17 @@ private:
         n = bins_.size();
         ar & n;
         for (auto& bin: bins_)              { ar & *bin; }
+
+        if (version >= 3)
+        {
+            ar & use_witness_;
+            ar & redeempattern_;
+        }
+
+        if (version >= 4)
+        {
+            ar & use_witness_p2sh_;
+        }
     }
     template<class Archive>
     void load(Archive& ar, const unsigned int version)
@@ -765,6 +808,22 @@ private:
             bins_.push_back(bin);
         }
 
+        if (version >= 3)
+        {
+            ar & use_witness_;
+            ar & redeempattern_;
+        }
+        else
+        {
+            initScriptPatterns();
+        }
+
+        use_witness_p2sh_ = false;
+        if (version >= 4)
+        {
+            ar & use_witness_p2sh_;
+        }
+
         updateHash();
     }
     BOOST_SERIALIZATION_SPLIT_MEMBER()
@@ -799,8 +858,9 @@ public:
     void status(status_t status);
     status_t status() const { return status_; }
 
-	void markUsed();
+    void markUsed();
 
+    const bytes_t& redeemscript() const { return redeemscript_; }  
     const bytes_t& txinscript() const { return txinscript_; }
     const bytes_t& txoutscript() const { return txoutscript_; }
 
@@ -833,6 +893,8 @@ private:
     std::string label_;
     status_t status_;
 
+    #pragma db type("BLOB")
+    bytes_t redeemscript_;
     #pragma db type("BLOB")
     bytes_t txinscript_; // unsigned (0 byte length placeholders are used for signatures)
     #pragma db type("BLOB")
@@ -1031,7 +1093,7 @@ public:
     TxIn(const Coin::TxIn& coin_txin);
     TxIn(const bytes_t& raw);
 
-	void fromCoinCore(const Coin::TxIn& coin_txin);
+    void fromCoinCore(const Coin::TxIn& coin_txin);
     Coin::TxIn toCoinCore() const;
 
     unsigned long id() const { return id_; }
@@ -1054,6 +1116,9 @@ public:
     void outpoint(std::shared_ptr<TxOut> outpoint);
     const std::shared_ptr<TxOut> outpoint() const { return outpoint_.lock(); }
 
+    void scriptwitnessstack(const std::vector<bytes_t>& scriptwitnessstack) { scriptwitnessstack_ = scriptwitnessstack; }
+    const std::vector<bytes_t>& scriptwitnessstack() const { return scriptwitnessstack_; }
+
     std::string toJson() const;
 
 private:
@@ -1075,15 +1140,48 @@ private:
     #pragma db null
     std::weak_ptr<TxOut> outpoint_;
 
+    #pragma db value_not_null \
+        id_column("object_id") value_column("value")
+    std::vector<bytes_t> scriptwitnessstack_;
+
     friend class boost::serialization::access;
     template<class Archive>
-    void serialize(Archive& ar, const unsigned int /*version*/)
+    void save(Archive& ar, const unsigned int version) const
     {
         ar & outhash_;
         ar & outindex_;
         ar & script_;
         ar & sequence_;
+
+        if (version >= 2)
+        {
+            uint32_t n = scriptwitnessstack_.size();
+            ar & n;
+            for (auto& scriptwitnessitem: scriptwitnessstack_)    { ar & scriptwitnessitem; }
+        }
     }
+    template<class Archive>
+    void load(Archive& ar, const unsigned int version)
+    { 
+        ar & outhash_;
+        ar & outindex_;
+        ar & script_;
+        ar & sequence_;
+
+        if (version >= 2)
+        {
+            uint32_t n;
+            ar & n;
+            scriptwitnessstack_.clear();
+            for (uint32_t i = 0; i < n; i++)
+            {
+                bytes_t scriptwitnessitem;
+                ar & scriptwitnessitem;
+                scriptwitnessstack_.push_back(scriptwitnessitem);
+            }
+        }
+    }
+    BOOST_SERIALIZATION_SPLIT_MEMBER()
 };
 
 typedef std::vector<std::shared_ptr<TxIn>> txins_t;
@@ -1245,12 +1343,14 @@ public:
     static std::string              getStatusString(int status, bool lowercase = false);
     static std::vector<status_t>    getStatusFlags(int status);
 
+    std::string                     getStatusString() const { return getStatusString(status_); }
+
     Tx(uint32_t version = 1, uint32_t locktime = 0, uint32_t timestamp = 0xffffffff, status_t status = PROPAGATED, bool conflicting = false)
         : version_(version), locktime_(locktime), timestamp_(timestamp), status_(status), conflicting_(conflicting),  have_all_outpoints_(false), txin_total_(0), txout_total_(0) { }
 
-    void set(uint32_t version, const txins_t& txins, const txouts_t& txouts, uint32_t locktime, uint32_t timestamp = 0xffffffff, status_t status = PROPAGATED, bool conflicting = false);
-    void set(Coin::Transaction coin_tx, uint32_t timestamp = 0xffffffff, status_t status = PROPAGATED, bool conflicting = false);
-    void set(const bytes_t& raw, uint32_t timestamp = 0xffffffff, status_t status = PROPAGATED, bool conflicting = false);
+    void set(uint32_t version, const txins_t& txins, const txouts_t& txouts, uint32_t locktime, uint32_t timestamp = 0xffffffff, status_t status = PROPAGATED, bool conflicting = false, bool checksigs = false);
+    void set(Coin::Transaction coin_tx, uint32_t timestamp = 0xffffffff, status_t status = PROPAGATED, bool conflicting = false, bool checksigs = false);
+    void set(const bytes_t& raw, uint32_t timestamp = 0xffffffff, status_t status = PROPAGATED, bool conflicting = false, bool checksigs = false);
 
     Coin::Transaction toCoinCore() const;
 
@@ -1266,12 +1366,12 @@ public:
     txins_t txins() const { return txins_; }
     txouts_t txouts() const { return txouts_; }
     uint32_t locktime() const { return locktime_; }
-    bytes_t raw() const;
+    bytes_t raw(bool withWitness = true) const;
 
     void timestamp(uint32_t timestamp) { timestamp_ = timestamp; }
     uint32_t timestamp() const { return timestamp_; }
 
-    bool updateStatus(status_t status = NO_STATUS); // Will keep the status it already had if it didn't change and no parameter is passed. Returns true iff status changed.
+    bool updateStatus(status_t status = NO_STATUS, bool checksigs = false); // Will keep the status it already had if it didn't change and no parameter is passed. Returns true iff status changed.
     void status(status_t status) { status_ = status; }
     status_t status() const { return status_; }
 
@@ -1584,6 +1684,9 @@ struct SigningScriptView
     #pragma db column(SigningScript::status_)
     SigningScript::status_t status;
 
+    #pragma db column(SigningScript::redeemscript_)
+    bytes_t redeemscript;
+
     #pragma db column(SigningScript::txinscript_)
     bytes_t txinscript;
 
@@ -1758,6 +1861,9 @@ struct TxOutView
     #pragma db column(SigningScript::status_)
     SigningScript::status_t signingscript_status;
 
+    #pragma db column(SigningScript::redeemscript_)
+    bytes_t signingscript_redeemscript;
+
     #pragma db column(SigningScript::txinscript_)
     bytes_t signingscript_txinscript;
 
@@ -1915,12 +2021,12 @@ struct IncompleteBlockCountView
 BOOST_CLASS_VERSION(CoinDB::BlockHeader, 1)
 BOOST_CLASS_VERSION(CoinDB::MerkleBlock, 1)
 
-BOOST_CLASS_VERSION(CoinDB::TxIn, 1)
+BOOST_CLASS_VERSION(CoinDB::TxIn, 2)
 BOOST_CLASS_VERSION(CoinDB::TxOut, 1)
 BOOST_CLASS_VERSION(CoinDB::Tx, 3)
 
 BOOST_CLASS_VERSION(CoinDB::Keychain, 3)
 BOOST_CLASS_VERSION(CoinDB::AccountBin, 2)
-BOOST_CLASS_VERSION(CoinDB::Account, 2)
+BOOST_CLASS_VERSION(CoinDB::Account, 4)
 
 #endif // COINDB_SCHEMA_H

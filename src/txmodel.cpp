@@ -5,8 +5,11 @@
 // txmodel.cpp
 //
 // Copyright (c) 2014 Eric Lombrozo
+// Copyright (c) 2011-2016 Ciphrex Corp.
 //
-// All Rights Reserved.
+// Distributed under the MIT software license, see the accompanying
+// file LICENSE or http://www.opensource.org/licenses/mit-license.php.
+//
 
 #include "txmodel.h"
 
@@ -32,9 +35,7 @@ using namespace std;
 TxModel::TxModel(QObject* parent)
     : QStandardItemModel(parent)
 {
-    base58_versions[0] = getCoinParams().pay_to_pubkey_hash_version();
-    base58_versions[1] = getCoinParams().pay_to_script_hash_version();
-
+    setBase58Versions();
     currencySymbol = getCurrencySymbol();
 
     setColumns();
@@ -43,14 +44,22 @@ TxModel::TxModel(QObject* parent)
 TxModel::TxModel(CoinDB::Vault* vault, const QString& accountName, QObject* parent)
     : QStandardItemModel(parent)
 {
-    base58_versions[0] = getCoinParams().pay_to_pubkey_hash_version();
-    base58_versions[1] = getCoinParams().pay_to_script_hash_version();
-
+    setBase58Versions();
     currencySymbol = getCurrencySymbol();
 
     setColumns();
     setVault(vault);
     setAccount(accountName);
+}
+
+void TxModel::setBase58Versions()
+{
+    base58_versions[0] = getCoinParams().pay_to_pubkey_hash_version();
+#ifdef SUPPORT_OLD_ADDRESS_VERSIONS
+    base58_versions[1] = getUseOldAddressVersions() ? getCoinParams().old_pay_to_script_hash_version() : getCoinParams().pay_to_script_hash_version();
+#else
+    base58_versions[1] = getCoinParams().pay_to_script_hash_version();
+#endif
 }
 
 void TxModel::setColumns()
@@ -113,6 +122,8 @@ private:
 
 void TxModel::update()
 {
+    setBase58Versions();
+
     QString newCurrencySymbol = getCurrencySymbol();
     if (newCurrencySymbol != currencySymbol)
     {

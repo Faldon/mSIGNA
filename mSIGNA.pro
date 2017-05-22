@@ -11,7 +11,7 @@ isEmpty(PREFIX) {
 PREFIX = $$clean_path($$PREFIX)
 
 # Application icons for windows
-RC_FILE = res/coinvault.rc
+RC_FILE = res/mSIGNA.rc
 
 # Application icons for mac
 ICON = res/icons/app_icons/osx.icns
@@ -167,7 +167,7 @@ SOURCES = \
     src/setpassphrasedialog.cpp
 
 RESOURCES = \
-    res/coinvault.qrc \
+    res/mSIGNA.qrc \
     docs/docs.qrc
 
 # install

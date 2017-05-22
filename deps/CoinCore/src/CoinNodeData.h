@@ -3,24 +3,11 @@
 // CoinNodeData.h
 //
 // Copyright (c) 2011-2014 Eric Lombrozo
+// Copyright (c) 2011-2016 Ciphrex Corp.
 //
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
+// Distributed under the MIT software license, see the accompanying
+// file LICENSE or http://www.opensource.org/licenses/mit-license.php.
 //
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-// THE SOFTWARE.
 
 #pragma once
 
@@ -52,6 +39,11 @@ void SetMultiSigAddressVersion(unsigned char version);
 #define MSG_TX                        1
 #define MSG_BLOCK                     2
 #define MSG_FILTERED_BLOCK            3
+#define MSG_WITNESS_BLOCK             4
+#define MSG_WITNESS_TX                5
+
+const uint32_t MSG_WITNESS_FLAG     = 1 << 30;
+const uint32_t MSG_TYPE_MASK        = 0xffffffff >> 2;
 
 #define MIN_VAR_INT_SIZE              1
 #define MIN_VAR_STR_SIZE              1
@@ -90,6 +82,14 @@ extern uchar_vector g_zero32bytes;
 namespace Coin
 {
 
+enum HashType
+{
+    SIGHASH_ALL             = 0x01,
+    SIGHASH_NONE            = 0x02,
+    SIGHASH_SINGLE          = 0x03,
+    SIGHASH_ANYONECANPAY    = 0x80
+};
+
 typedef std::function<uchar_vector(const uchar_vector&)> hashfunc_t;
 
 class CoinNodeStructure
@@ -108,7 +108,7 @@ public:
     virtual const uchar_vector& getHash(hashfunc_t hashfunc) const;
     virtual const uchar_vector& getHashLittleEndian(hashfunc_t hashfunc) const;
 
-    virtual uint32_t getChecksum() const; // 4 least significant bytes, big endian
+    virtual uint32_t getChecksum() const; // 4 least significant bytes, little endian
 
     virtual uchar_vector getSerialized() const = 0;
     virtual void setSerialized(const uchar_vector& bytes) = 0;
@@ -571,16 +571,40 @@ public:
     std::string toIndentedString(uint spaces = 0) const;
 };
 
+class ScriptWitness : public CoinNodeStructure
+{
+public:
+    std::vector<uchar_vector> stack;
+
+    ScriptWitness() { }
+    ScriptWitness(const uchar_vector& bytes) { setSerialized(bytes); }
+
+    void clear() { stack.clear(); }
+    void push(const uchar_vector& data) { stack.push_back(data); }
+    bool isEmpty() const { return stack.empty(); }
+
+    const char* getCommand() const { return ""; }
+    uint64_t getSize() const;
+
+    uchar_vector getSerialized() const;
+    void setSerialized(const uchar_vector& bytes);
+
+    // TODO: toString methods
+    std::string toString() const { return std::string(); }
+    std::string toIndentedString(uint spaces = 0) const { return std::string(); }
+};
+
 class TxIn : public CoinNodeStructure
 {
 public:
     OutPoint previousOut;
     uchar_vector scriptSig;
     uint32_t sequence;
+    ScriptWitness scriptWitness;
 
     TxIn() { }
     TxIn(const TxIn& txIn)
-        : previousOut(txIn.previousOut), scriptSig(txIn.scriptSig), sequence(txIn.sequence) { }
+        : previousOut(txIn.previousOut), scriptSig(txIn.scriptSig), sequence(txIn.sequence), scriptWitness(txIn.scriptWitness) { }
     TxIn(const OutPoint& _previousOut, const uchar_vector& _scriptSig, uint32_t _sequence)
         : previousOut(_previousOut), scriptSig(_scriptSig), sequence(_sequence) { }
     TxIn(const OutPoint& previousOut, const std::string& scriptSigHex, uint32_t sequence);
@@ -598,6 +622,8 @@ public:
     std::string toString() const;
     std::string toIndentedString(uint spaces = 0) const;
     std::string toJson() const;
+
+    bool hasWitness() const { return !scriptWitness.isEmpty(); }
 };
 
 class TxOut : public CoinNodeStructure
@@ -639,12 +665,32 @@ public:
     Transaction(const Transaction& tx)
         : version(tx.version), inputs(tx.inputs), outputs(tx.outputs), lockTime(tx.lockTime) { }
 
+    const uchar_vector& getHash() const { return getHash(false); }
+    const uchar_vector& getHash(bool bWithWitness) const;
+
+    const uchar_vector& getHashLittleEndian() const { return getHashLittleEndian(false); }
+    const uchar_vector& getHashLittleEndian(bool bWithWitness) const;
+
+    const uchar_vector& getHash(hashfunc_t hashfunc) const { return getHash(hashfunc, false); }
+    const uchar_vector& getHash(hashfunc_t hashfunc, bool bWithWitness) const;
+
+    const uchar_vector& getHashLittleEndian(hashfunc_t hashfunc) const { return getHashLittleEndian(hashfunc, false); }
+    const uchar_vector& getHashLittleEndian(hashfunc_t hashfunc, bool bWithWitness) const;
+
     const uchar_vector& hash() const { return getHashLittleEndian(); }
 
+    uint32_t getChecksum() const;
+
     const char* getCommand() const { return "tx"; }
-    uint64_t getSize() const;
+
+    bool hasWitness() const { for (auto& input: inputs) { if (input.hasWitness()) return true; } return false; }
+
+    uint64_t getSize() const { return this->getSize(true); }
+    uint64_t getSize(bool bWithWitness) const;
+
     uchar_vector getSerialized() const { return this->getSerialized(true); }
-    uchar_vector getSerialized(bool includeScriptSigLength) const;
+    uchar_vector getSerialized(bool bWithWitness) const;
+
     void setSerialized(const uchar_vector& bytes);
 
     std::string toString() const;
@@ -664,6 +710,13 @@ public:
     uint64_t getTotalSent() const;
 
     uchar_vector getHashWithAppendedCode(uint32_t code) const; // in little endian
+    uchar_vector getSigHash(uint32_t hashType, uint index, const uchar_vector& script, uint64_t value = 0) const;
+    void resetSigHash();
+
+private:
+    mutable uchar_vector hashPrevouts;
+    mutable uchar_vector hashSequence;
+    mutable uchar_vector hashOutputs;
 };
 
 class CoinBlock;

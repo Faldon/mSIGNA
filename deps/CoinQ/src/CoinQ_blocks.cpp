@@ -3,8 +3,11 @@
 // CoinQ_blocks.cpp
 //
 // Copyright (c) 2013 Eric Lombrozo
+// Copyright (c) 2011-2016 Ciphrex Corp.
 //
-// All Rights Reserved.
+// Distributed under the MIT software license, see the accompanying
+// file LICENSE or http://www.opensource.org/licenses/mit-license.php.
+//
 
 #include "CoinQ_blocks.h"
 
@@ -93,6 +96,7 @@ bool CoinQBlockTreeMem::unsetBestChain(ChainHeader& header)
 
 void CoinQBlockTreeMem::setGenesisBlock(const Coin::CoinBlockHeader& header)
 {
+    LOGGER(trace) << "setGenesisBlock - hash: " << header.getPOWHashLittleEndian().getHex() << std::endl;
     if (mHeaderHashMap.size() != 0) throw std::runtime_error("Tree is not empty.");
 
     bFlushed = false;

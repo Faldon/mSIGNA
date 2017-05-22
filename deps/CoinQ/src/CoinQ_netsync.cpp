@@ -3,8 +3,11 @@
 // CoinQ_netsync.cpp
 //
 // Copyright (c) 2013 Eric Lombrozo
+// Copyright (c) 2011-2016 Ciphrex Corp.
 //
-// All Rights Reserved.
+// Distributed under the MIT software license, see the accompanying
+// file LICENSE or http://www.opensource.org/licenses/mit-license.php.
+//
 
 #include "CoinQ_netsync.h"
 
@@ -115,10 +118,10 @@ NetworkSync::NetworkSync(const CoinQ::CoinParams& coinParams, bool bCheckProofOf
             switch (item.itemType)
             {
             case MSG_TX:
-                getData.items.push_back(item);
+                getData.items.push_back(InventoryItem(MSG_TX | peer.inv_flags(), item.hash));
                 break;
             case MSG_BLOCK:
-                getData.items.push_back(InventoryItem(MSG_FILTERED_BLOCK, item.hash));
+                getData.items.push_back(InventoryItem(MSG_FILTERED_BLOCK | peer.inv_flags(), item.hash));
                 break;
             default:
                 break;
@@ -160,11 +163,11 @@ NetworkSync::NetworkSync(const CoinQ::CoinParams& coinParams, bool bCheckProofOf
             if (headersMessage.headers.size() > 0)
             {
                 notifySynchingHeaders();
+                boost::unique_lock<boost::mutex> fileFlushLock(m_fileFlushMutex);
                 for (auto& item: headersMessage.headers)
                 {
                     try
                     {
-                        boost::unique_lock<boost::mutex> fileFlushLock(m_fileFlushMutex);
                         if (m_blockTree.insertHeader(item)) { m_bHeadersSynched = false; }
                     }
                     catch (const std::exception& e)
